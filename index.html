@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片解密示例</title>
+    <style>
+        .input-label {
+            display: inline-block;
+            width: 120px;
+            font-weight: bold;
+        }
+
+        .hide {
+            display: none;
+        }
+
+        .img-canvas-style {
+            display: block;
+            max-width: 100%;
+            width: auto;
+            height: auto;
+        }
+        .large-button {
+            font-size: 1.5rem;
+            padding: 12px 24px;
+            min-width: 100px;
+            cursor: pointer;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/blueimp-md5/2.18.0/js/md5.min.js"></script>
+    <script>
+        class AliyunPanManager {
+            constructor(refresh_token, access_token = null, token_refresh_callback = null, client_id = "", client_secret = "", base = 'https://openapi.aliyundrive.com', oauth_token_url = "https://api.nn.ci/alist/ali_open/token") {
+                this.base = base;
+                this.refresh_token = refresh_token;
+                this.client_id = client_id;
+                this.client_secret = client_secret;
+                this.oauth_token_url = oauth_token_url;
+                this.access_token = access_token;
+                this.drive_id = null;
+                this.token_refresh_callback = token_refresh_callback;
+            }
+
+            update_token(access_token, refresh_token) {
+                if (refresh_token) {
+                    this.refresh_token = refresh_token;
+                }
+                if (access_token) {
+                    this.access_token = access_token;
+                }
+            }
+
+            async request(uri, method, data = {}, callback = null, retry = false) {
+                let headers = { "Authorization": `Bearer ${this.access_token}` };
+                if (method.toUpperCase() == "POST") {
+                    headers["Content-Type"] = "application/json";
+                }
+
+                let url = new URL(uri, this.base);
+                if ('drive_id' in data && !data.drive_id) {
+                    if (!this.drive_id) {
+                        await this.get_drive_info();
+                    }
+                    data.drive_id = this.drive_id;
+                }
+                data = JSON.stringify(data);
+                if (callback) {
+                    callback({ url, headers, data });
+                }
+
+                let response = await fetch(url, { method: method.toUpperCase(), headers, body: data });
+                let response_data = await response.json();
+
+                if (response_data.hasOwnProperty('code')) {
+                    if ((!retry && ["AccessTokenInvalid", "AccessTokenExpired", "I400JD"].includes(response_data['code'])) || this.access_token == "") {
+                        if (await this._refresh_token_req()) {
+                            return await this.request(uri, method, JSON.parse(data), callback, true);
+                        }
+                    }
+                }
+
+                if (response.status != 200) {
+                    throw new Error(`AliyundriveOpenRsponseError, status = ${response.status}, reason = ${response.statusText}`);
+                }
+                if (response_data.hasOwnProperty('Message')) {
+                    throw new Error(`${response_data['Code']}:${response_data['Message']}`);
+                }
+
+                return response_data;
+            }
+
+            async _refresh_token_req() {
+                let url = new URL("/oauth/access_token", this.base);
+
+                if (this.oauth_token_url != "" && this.client_id == "") {
+                    url = this.oauth_token_url;
+                }
+
+                let data = JSON.stringify({
+                    "client_id": this.client_id,
+                    "client_secret": this.client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": this.refresh_token,
+                });
+
+                let headers = { 'Content-Type': 'application/json' };
+                let response = await fetch(url, { method: "POST", headers, body: data });
+                let response_data = await response.json();
+                if (!response_data.hasOwnProperty("refresh_token")) {
+                    throw new Error("Failed to refresh token: refreshToken is empty");
+                }
+
+                this.refresh_token = response_data["refresh_token"];
+                this.access_token = response_data["access_token"];
+                if (this.token_refresh_callback) {
+                    this.token_refresh_callback(this.access_token, this.refresh_token);
+                }
+
+                return true;
+            }
+
+            async get_drive_info() {
+                let uri = "/adrive/v1.0/user/getDriveInfo";
+                let response_data = await this.request(uri, "POST");
+                this.drive_id = response_data.default_drive_id;
+            }
+
+            async search_file(name, parent_file_id = '', type = 'file') {
+                let uri = "/adrive/v1.0/openFile/search";
+
+                let query = `name = '${name}' and type = '${type}'`;
+                if (parent_file_id) {
+                    query += ` and parent_file_id = '${parent_file_id}'`;
+                }
+
+                let data = {
+                    "drive_id": this.drive_id,
+                    "query": query,
+                };
+                let response_data = await this.request(uri, "POST", data);
+                return response_data.items || [];
+            }
+
+            // 获取文件列表 DESC ASC
+            async fetch_open_file_list(limit = 200, parent_file_id, marker, order_direction = 'ASC') {
+                const uri = '/adrive/v1.0/openFile/list';
+                const method = 'POST';
+                const data = {
+                    "drive_id": this.drive_id,
+                    "limit": limit,
+                    "parent_file_id": parent_file_id,
+                    "order_direction": order_direction
+                };
+                if (marker) {
+                    data.marker = marker;
+                }
+
+                const response = await this.request(uri, method, data);
+                return response;
+            }
+
+            async rename_file(file_id, new_name) {
+                const uri = '/adrive/v1.0/openFile/update';
+                const method = 'POST';
+                const data = {
+                    "drive_id": this.drive_id,
+                    "file_id": file_id,
+                    "name": new_name
+                };
+
+                const response = await this.request(uri, method, data);
+                return response;
+            }
+        }
+
+
+    </script>
+    <script>
+        function onImageLoaded(e, aid, pid) {
+            var t
+            null == e.nextElementSibling
+                ? ((t = document.createElement('canvas')), e.after(t))
+                : (t = document.getElementById(e.id).nextElementSibling)
+            t.classList.add('img-canvas-style');
+
+            var a = t.getContext('2d'),
+                n = e.width,
+                d = e.naturalWidth,
+                i = e.naturalHeight
+                ; (t.width = d),
+                    (t.height = i),
+                    (n > e.parentNode.offsetWidth || 0 == n) && (n = e.parentNode.offsetWidth),
+                    (t.style.width = n + 'px'),
+                    (t.style.display = 'block')
+
+            var o = pid
+            var s = get_num(window.btoa(aid), window.btoa(o))
+            for (
+                var l = parseInt(i % s),
+                r = d,
+                m = 0;
+                m < s;
+                m++
+            ) {
+                var c = Math.floor(i / s),
+                    g = c * m,
+                    w = i - c * (m + 1) - l
+                0 == m ? (c += l) : (g += l), a.drawImage(e, 0, w, r, c, 0, g, r, c)
+            }
+            e.classList.add("hide");
+        }
+
+        function get_num(e, t) {
+            var a = 10,
+                n = (e = window.atob(e)) + (t = window.atob(t))
+            switch (
+            ((n = (n = (n = md5(n)).substr(-1)).charCodeAt()),
+                e >= window.atob('MjY4ODUw') && e <= window.atob('NDIxOTI1')
+                    ? (n %= 10)
+                    : e >= window.atob('NDIxOTI2') && (n %= 8),
+                n)
+            ) {
+                case 0:
+                    a = 2
+                    break
+                case 1:
+                    a = 4
+                    break
+                case 2:
+                    a = 6
+                    break
+                case 3:
+                    a = 8
+                    break
+                case 4:
+                    a = 10
+                    break
+                case 5:
+                    a = 12
+                    break
+                case 6:
+                    a = 14
+                    break
+                case 7:
+                    a = 16
+                    break
+                case 8:
+                    a = 18
+                    break
+                case 9:
+                    a = 20
+            }
+            return a
+        }
+
+        // 图片解密
+        async function xor_decrypt(fileName, encrypted_url, password) {
+            const response = await fetch(encrypted_url, {
+                method: "GET",
+                referrer: ''
+            });
+            const encrypted_data = new Uint8Array(await response.arrayBuffer());
+
+            const password_bytes = new TextEncoder().encode(password);
+            const password_length = password_bytes.length;
+
+            for (let i = 0; i < encrypted_data.length; i++) {
+                encrypted_data[i] ^= password_bytes[i % password_length];
+            }
+
+            // 将解密后的数据转换为可用于img标签的格式
+            const blob = new Blob([encrypted_data], { type: "image/png" });
+            const image_url = URL.createObjectURL(blob);
+            return image_url;
+        }
+
+        function decrypt_and_show_image(fileName = '') {
+            const encrypted_url = document.getElementById("encrypted_image_url").value;
+            const password = document.getElementById("password").value;
+
+            xor_decrypt(fileName, encrypted_url, password)
+                .then((image_url) => {
+                    const imgElement = document.getElementById("decrypted_image");
+                    if (fileName) {
+                        let aid_pid = fileName.split('.')[0];
+                        let aid = parseInt(aid_pid.split('_')[0]);
+                        let pid = aid_pid.split('_')[1];
+                        imgElement.onload = function () {
+                            onImageLoaded(imgElement, aid, pid);
+                        };
+                    };
+                    imgElement.src = image_url;
+
+                })
+                .catch((error) => console.error("解密失败:", error));
+        }
+    </script>
+
+    <script>
+        window.cache = {
+            showImgIndex: -1,
+            currentFileListRsp: undefined,
+            currentFileList: []
+
+        }
+        // 阿里云盘UI操作
+
+        async function fetchAndDisplayOpenFileList(loadMore = false) {
+            const parentFileId = document.getElementById("parent_file_id_input").value;
+
+            const uiNextMaker = document.getElementById('ui_next_marker');
+            let nextMarker = uiNextMaker.innerText;
+
+            const response = await window.aliyunPanManager.fetch_open_file_list(200, parentFileId, loadMore ? nextMarker : null);
+            window.cache.currentFileListRsp = response;
+            if(loadMore){
+                window.cache.currentFileList = window.cache.currentFileList.concat(response.items);
+            } else {
+                window.cache.currentFileList = response.items;
+            }
+
+            uiNextMaker.innerText = response.next_marker;
+
+            const tableBody = document.getElementById("file_list_table_body");
+            if (!loadMore) {
+                tableBody.innerHTML = ""; // 如果不是加载更多，清空表格内容
+            }
+
+            response.items.forEach((item, index) => {
+                const row = document.createElement("tr");
+
+                const nameCell = document.createElement("td");
+                const nameLink = document.createElement("a");
+                nameLink.textContent = item.name;
+                if (item.type === 'folder') {
+                    nameLink.onclick = () => {
+                        document.getElementById("parent_file_id_input").value = item.file_id;
+                        fetchAndDisplayOpenFileList();
+                    };
+                } else if (item.type === 'file') {
+                    // 请确保页面中存在ID为 encrypted_image_url 的输入框
+                    nameLink.onclick = () => {
+                        if(loadMore){
+                            window.cache.showImgIndex += index;
+                        } else {
+                            window.cache.showImgIndex = index;
+                        }
+                        document.getElementById("encrypted_image_url").value = item.url;
+                        if (item.url) {
+                            decrypt_and_show_image(item.name); // 请确保已编写 decrypt_and_show_image 函数
+                        }
+                    };
+                }
+                nameCell.appendChild(nameLink);
+                row.appendChild(nameCell);
+
+                const typeCell = document.createElement("td");
+                typeCell.textContent = item.type;
+                row.appendChild(typeCell);
+
+                const fileIdCell = document.createElement("td");
+                fileIdCell.textContent = item.file_id;
+                row.appendChild(fileIdCell);
+
+                const urlCell = document.createElement("td");
+                urlCell.textContent = item.url || "URL 未提供";
+                row.appendChild(urlCell);
+
+                tableBody.appendChild(row);
+            });
+        }
+
+        async function renameAllCurrentFile(prefix) {
+            let _prefix = prefix ? prefix : document.getElementById("file_rename_prefix").value;
+            window.cache.currentFileList.forEach(async item => {
+                newname = _prefix + item.name;
+                await window.aliyunPanManager.rename_file(item.file_id, newname);
+            });
+
+        }
+
+        async function showNextImage(prev = false) {
+            if(window.cache.showImgIndex < 0 || !window.cache.currentFileList) {
+                return
+            }
+
+            let next = Math.min(window.cache.showImgIndex + 1, window.cache.currentFileList.length - 1);
+            if(prev){
+                next = Math.max(window.cache.showImgIndex - 1, 0);
+            }
+            let img_msg = document.getElementById("img_msg");
+            if(next == window.cache.showImgIndex) {
+                img_msg.innerHTML = '到头了';
+                return;
+            }
+            img_msg.innerHTML = '';
+            window.cache.showImgIndex = next;
+            let item = window.cache.currentFileList[next];
+            if(!item.name.endsWith('.eimg')) {
+                showNextImage(prev);
+                return;
+            }
+            document.getElementById("encrypted_image_url").value = item.url;
+            if (item.url) {
+                decrypt_and_show_image(item.name); // 请确保已编写 decrypt_and_show_image 函数
+            }
+        }
+    </script>
+
+    <script>
+        function saveAndUpdateCredentials(accessToken = "", refreshToken = "", show_alert = false) {
+            const _accessToken = accessToken ? accessToken : document.getElementById("access_token_input").value;
+            const _refreshToken = refreshToken ? refreshToken : document.getElementById("refresh_token_input").value;
+            const password = document.getElementById("password").value;
+
+            if (_accessToken && _refreshToken) {
+                localStorage.setItem("access_token", _accessToken);
+                localStorage.setItem("refresh_token", _refreshToken);
+                localStorage.setItem("password", password);
+
+                if (window.aliyunPanManager) {
+                    window.aliyunPanManager.update_token(_accessToken, _refreshToken);
+                } else {
+                    window.aliyunPanManager = new AliyunPanManager(_refreshToken, _accessToken, (accessToken, refreshToken) => {
+                        localStorage.setItem("access_token", accessToken);
+                        localStorage.setItem("refresh_token", refreshToken);
+                    });
+                }
+                show_alert && alert("保存成功!");
+            } else {
+                show_alert && alert("请填写 access_token 和 refresh_token");
+            }
+        }
+
+        function initialize() {
+            const accessToken = localStorage.getItem("access_token");
+            const refreshToken = localStorage.getItem("refresh_token");
+            const password = localStorage.getItem("password");
+
+            if (accessToken && refreshToken) {
+                document.getElementById("access_token_input").value = accessToken;
+                document.getElementById("refresh_token_input").value = refreshToken;
+                document.getElementById("password").value = password;
+
+                saveAndUpdateCredentials(accessToken, refreshToken, false)
+            }
+        }
+    </script>
+</head>
+
+<body onload="initialize()">
+
+    <h2>设置</h2>
+    <div id="setting">
+        <div>
+            <span class="input-label">Access Token:</span>
+            <input type="text" id="access_token_input">
+        </div>
+        <div>
+            <span class="input-label">Refresh Token:</span>
+            <input type="text" id="refresh_token_input">
+        </div>
+        <div>
+            <label for="password">解密密码: </label>
+            <input type="text" id="password" placeholder="your_password">
+        </div>
+        <div>
+            <button onclick="saveAndUpdateCredentials('','', true)">保存</button>
+        </div>
+    </div>
+    <h2>阿里云盘浏览</h2>
+    <!-- 输入框代码 -->
+    <div>
+        <div>
+            <span class="input-label">Parent File ID:</span>
+            <input type="text" id="parent_file_id_input" value="root">
+        </div>
+        <div>
+            <button onclick="fetchAndDisplayOpenFileList()">获取文件列表</button>
+        </div>
+    </div>
+
+    <!-- 表格代码 -->
+    <table border="1" id="file_list_table">
+        <thead>
+            <tr>
+                <th>名称</th>
+                <th>类型</th>
+                <th>file_id</th>
+                <th>URL</th>
+            </tr>
+        </thead>
+        <tbody id="file_list_table_body">
+        </tbody>
+    </table>
+    <div>
+        <button onclick="fetchAndDisplayOpenFileList(true)">更多</button>
+        <span id="ui_next_marker"></span>
+    </div>
+    <h2>重命名</h2>
+    <div id="renameFile">
+        <label>前缀: </label>
+        <input type="text" id="file_rename_prefix">
+        <button onclick="renameAllCurrentFile()">rename</button>
+    </div>
+    <h1>图片解密示例</h1>
+    <div id="loadAndDecodImg">
+        <label for="encrypted_image_url">加密图片URL: </label>
+        <input type="text" id="encrypted_image_url" placeholder="https://example.com/encrypted_image.enc">
+        <br>
+        <button onclick="decrypt_and_show_image()">解密并显示图片</button>
+
+        <hr>
+        <h2>解密图片:</h2>
+        <div><span id="img_msg"></span></div>
+        <button class="large-button" id="prev_image" onclick="showNextImage(true)">上一张</button>
+        <button class="large-button" id="next_image" onclick="showNextImage(false)">下一张</button>
+        <img id="decrypted_image" alt="解密图片将显示在这里">
+        <canvas class="img-canvas-style"></canvas>
+        <br>
+        <button class="large-button" id="prev_image" onclick="showNextImage(true)">上一张</button>
+        <button class="large-button" id="next_image" onclick="showNextImage(false)">下一张</button>
+    </div>
+</body>
+
+</html>
